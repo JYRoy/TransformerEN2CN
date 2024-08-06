@@ -9,7 +9,7 @@ from torch.nn import functional as F
 
 @dataclass
 class TransformerConfig:
-    vocab_size: int = 100277 # tiktoken.n_vocab获取到的vocab size
+    vocab_size: int = 100277  # tiktoken.n_vocab获取到的vocab size
     max_seq_len: int = 1024  # max sequence length
     n_layer: int = 6  # layer number
     n_head: int = 8  # head number
@@ -19,6 +19,7 @@ class TransformerConfig:
 class LayerNorm(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.a = nn.Parameter(torch.ones(config.d_model))
         self.b = nn.Parameter(torch.zeros(config.d_model))
         self.eps = 1e-6
@@ -33,6 +34,7 @@ class LayerNorm(nn.Module):
 class MultiHeadAttention(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         assert config.d_model % config.n_head == 0
 
         self.q_weight = nn.Linear(config.d_model, config.d_model)
@@ -44,21 +46,27 @@ class MultiHeadAttention(nn.Module):
 
         self.register_buffer(
             "mask",
-            torch.trill(torch.ones(config.max_seq_len, config.max_seq_len)).view(
+            torch.tril(torch.ones(config.max_seq_len, config.max_seq_len)).view(
                 1, 1, config.max_seq_len, config.max_seq_len
             ),
         )
 
-    def forward(self, q, k, v, mask: bool):
+    def forward(self, q, k, v, mask: bool = False):
         batch_size, seq_len, d_model = q.size()
 
         q = self.q_weight(q)
         k = self.k_weight(k)
         v = self.v_weight(v)
 
-        q = q.view(batch_size, seq_len, self.d_model // self.n_head).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.d_model // self.n_head).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.d_model // self.n_head).transpose(1, 2)
+        q = q.view(batch_size, -1, self.n_head, self.d_model // self.n_head).transpose(
+            1, 2
+        )
+        k = k.view(batch_size, -1, self.n_head, self.d_model // self.n_head).transpose(
+            1, 2
+        )
+        v = v.view(batch_size, -1, self.n_head, self.d_model // self.n_head).transpose(
+            1, 2
+        )
 
         scores = (q @ k.transpose(-2, -1)) * (1 / math.sqrt(k.size(-1)))
         if mask:
@@ -66,6 +74,7 @@ class MultiHeadAttention(nn.Module):
                 self.mask[:, :, :seq_len, :seq_len] == 0, float("-inf")
             )
         scores = F.softmax(scores, dim=-1)
+
         y = scores @ v
         y = y.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
         y = self.proj(y)
@@ -75,6 +84,7 @@ class MultiHeadAttention(nn.Module):
 class FeedForward(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.fc1 = nn.Linear(config.d_model, 4 * config.d_model)
         self.fc2 = nn.Linear(4 * config.d_model, config.d_model)
         self.gelu = nn.GELU()
@@ -89,12 +99,13 @@ class FeedForward(nn.Module):
 class Encoder(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.attention = MultiHeadAttention(config)
         self.layer_norm_1 = LayerNorm(config)
         self.feed_forward = FeedForward(config)
         self.layer_norm_2 = LayerNorm(config)
 
-    def forward(self):
+    def forward(self, x):
         x = self.layer_norm_1(x + self.attention(x, x, x))
         x = self.layer_norm_2(x + self.feed_forward(x))
         return x
@@ -103,6 +114,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.mask_attention = MultiHeadAttention(config)
         self.attention = MultiHeadAttention(config)
         self.layer_norm_1 = LayerNorm(config)
@@ -111,8 +123,8 @@ class Decoder(nn.Module):
         self.layer_norm_3 = LayerNorm(config)
 
     def forward(self, x, encoder_output):
-        x = self.layer_norm_1(x + self.mask_attention(x, x, x))
-        x = self.layer_norm_1(x + self.attention(encoder_output, encoder_output, x))
+        x = self.layer_norm_1(x + self.mask_attention(x, x, x, True))
+        x = self.layer_norm_1(x + self.attention(x, encoder_output, encoder_output))
         x = self.layer_norm_1(x + self.feed_forward(x))
         return x
 
@@ -120,9 +132,12 @@ class Decoder(nn.Module):
 class TransformerInput(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
 
-        self.position_embedding = torch.zeros(config.max_seq_len, config.d_model)
+        self.position_embedding = torch.zeros(config.max_seq_len, config.d_model).to(
+            "cuda"
+        )
         position = torch.arange(0, config.max_seq_len)
         position = position.unsqueeze(1)
 
@@ -135,21 +150,23 @@ class TransformerInput(nn.Module):
         self.register_buffer("pe", self.position_embedding)
 
     def forward(self, x):
-        return self.token_embedding(x) + self.position_embedding[:, : x.size(1)]
+        return self.token_embedding(x) + self.position_embedding[: x.size(1), :]
 
 
 class TransformerOutput(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
     def forward(self, x):
-        return self.head(x)
+        return F.log_softmax(self.head(x), dim=-1)
 
 
 class TransformerModel(nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.src_input = TransformerInput(config)
         self.tgt_input = TransformerInput(config)
         self.encoders = nn.ModuleList(
@@ -161,8 +178,11 @@ class TransformerModel(nn.Module):
         self.output = TransformerOutput(config)
 
     def forward(self, source, target):
-        source_embedding = self.src_input(source)
-        encode_output = self.encoders(source_embedding)
-        target_embedding = self.tgt_input(target)
-        output = self.decoders(target_embedding, encode_output)
+        x = self.src_input(source)
+        for encoder in self.encoders:
+            x = encoder(x)
+        target = self.tgt_input(target)
+        for decoder in self.decoders:
+            target = decoder(target, x)
+        output = self.output(target)
         return output

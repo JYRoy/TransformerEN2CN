@@ -40,17 +40,14 @@ class DataLoaderCMN:
 
         for line in text:
             en, cn, attribute = line.split("\t")
-            en = self.enc.encode(en.lower())
-            cn = self.enc.encode(cn)
+            en = torch.tensor(self.enc.encode(en.lower()))
+            cn = torch.tensor(self.enc.encode(cn))
             self.tokens.append((en, cn))
             self.en_tokens.append(en)
             self.cn_tokens.append(cn)
         self.num_paris = len(self.tokens)  # 24360 total
         print(f"loaded {self.num_paris} english to chinese sentence pairs")
 
-        sorted_index = len_argsort(self.en_tokens)
-        self.en_tokens = [self.en_tokens[i] for i in sorted_index]
-        self.cn_tokens = [self.cn_tokens[i] for i in sorted_index]
         self.en_tokens = (
             self.en_tokens[: self.num_paris * 90 // 100]
             if split == "train"
@@ -58,7 +55,7 @@ class DataLoaderCMN:
         )
 
         self.cn_tokens = (
-            self.en_tokens[: self.num_paris * 90 // 100]
+            self.cn_tokens[: self.num_paris * 90 // 100]
             if split == "train"
             else self.cn_tokens[self.num_paris * 90 // 100 + 1 :]
         )
@@ -66,6 +63,10 @@ class DataLoaderCMN:
         self.max_en_seq_len = max(len(s) for s in self.en_tokens)
         self.max_cn_seq_len = max(len(s) for s in self.cn_tokens)
         self.max_seq_len = max(self.max_en_seq_len, self.max_cn_seq_len)
+
+        sorted_index = len_argsort(self.en_tokens)
+        self.en_tokens = [self.en_tokens[i] for i in sorted_index]
+        self.cn_tokens = [self.cn_tokens[i] for i in sorted_index]
 
     def reset(self):
         self.current_position = 0
@@ -81,6 +82,7 @@ class DataLoaderCMN:
         self.current_position += self.batch_size
         if self.current_position + self.batch_size > self.num_paris:
             self.current_position = 0
-        return seq_padding(x_batch, self.enc.eot_token), seq_padding(
-            y_batch, self.enc.eot_token
-        )
+
+        x_batch = seq_padding(x_batch, self.enc.eot_token)
+        y_batch = seq_padding(y_batch, self.enc.eot_token)
+        return torch.tensor(x_batch), torch.tensor(y_batch)
