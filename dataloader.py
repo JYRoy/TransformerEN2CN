@@ -18,9 +18,11 @@ def seq_padding(batch, padding=0):
         ]
     )
 
+
 # 按照句子长度排序，尽可能减少padding
 def len_argsort(seq):
     return sorted(range(len(seq)), key=lambda x: len(seq[x]))
+
 
 class DataLoaderCMN:
 
@@ -49,7 +51,6 @@ class DataLoaderCMN:
         sorted_index = len_argsort(self.en_tokens)
         self.en_tokens = [self.en_tokens[i] for i in sorted_index]
         self.cn_tokens = [self.cn_tokens[i] for i in sorted_index]
-
         self.en_tokens = (
             self.en_tokens[: self.num_paris * 90 // 100]
             if split == "train"
@@ -61,6 +62,10 @@ class DataLoaderCMN:
             if split == "train"
             else self.cn_tokens[self.num_paris * 90 // 100 + 1 :]
         )
+
+        self.max_en_seq_len = max(len(s) for s in self.en_tokens)
+        self.max_cn_seq_len = max(len(s) for s in self.cn_tokens)
+        self.max_seq_len = max(self.max_en_seq_len, self.max_cn_seq_len)
 
     def reset(self):
         self.current_position = 0
@@ -76,14 +81,6 @@ class DataLoaderCMN:
         self.current_position += self.batch_size
         if self.current_position + self.batch_size > self.num_paris:
             self.current_position = 0
-        return seq_padding(x_batch, self.enc.eot_token), seq_padding(y_batch, self.enc.eot_token)
-
-
-dataloader = DataLoaderCMN(6, "train")
-i = 100
-while i:
-    x, y = dataloader.next_batch()
-    print(x)
-    print(y)
-    i -= 1
-
+        return seq_padding(x_batch, self.enc.eot_token), seq_padding(
+            y_batch, self.enc.eot_token
+        )
