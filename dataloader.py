@@ -53,12 +53,14 @@ class DataLoaderCMN:
             if split == "train"
             else self.en_tokens[self.num_paris * 90 // 100 + 1 :]
         )
+        self.num_en_pairs = self.num_paris * 90 // 100
 
         self.cn_tokens = (
             self.cn_tokens[: self.num_paris * 90 // 100]
             if split == "train"
             else self.cn_tokens[self.num_paris * 90 // 100 + 1 :]
         )
+        self.num_cn_pairs = self.num_paris * 90 // 100
 
         self.max_en_seq_len = max(len(s) for s in self.en_tokens)
         self.max_cn_seq_len = max(len(s) for s in self.cn_tokens)
@@ -67,6 +69,8 @@ class DataLoaderCMN:
         sorted_index = len_argsort(self.en_tokens)
         self.en_tokens = [self.en_tokens[i] for i in sorted_index]
         self.cn_tokens = [self.cn_tokens[i] for i in sorted_index]
+
+        self.steps_per_epoch = self.num_paris // self.batch_size
 
     def reset(self):
         self.current_position = 0
@@ -80,7 +84,7 @@ class DataLoaderCMN:
         ]
 
         self.current_position += self.batch_size
-        if self.current_position + self.batch_size > self.num_paris:
+        if self.current_position + self.batch_size > self.num_en_pairs:
             self.current_position = 0
 
         x_batch = seq_padding(x_batch, self.enc.eot_token)

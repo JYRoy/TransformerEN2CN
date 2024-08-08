@@ -10,7 +10,9 @@ from torch.nn import functional as F
 @dataclass
 class TransformerConfig:
     vocab_size: int = 100277  # tiktoken.n_vocab获取到的vocab size
-    max_seq_len: int = 1024  # max sequence length
+    train_max_seq_len: int = 1024  # max sequence length
+    val_max_seq_len: int = 1024  # max sequence length
+    max_seq_len: int = max(train_max_seq_len, val_max_seq_len)
     n_layer: int = 6  # layer number
     n_head: int = 8  # head number
     d_model: int = 768  # embedding dimension
@@ -178,11 +180,19 @@ class TransformerModel(nn.Module):
         self.output = TransformerOutput(config)
 
     def forward(self, source, target):
+        enc_out = self.encode(source)
+        target = self.decode(enc_out, target)
+        output = self.output(target)
+        return output
+
+    def encode(self, source):
         x = self.src_input(source)
         for encoder in self.encoders:
             x = encoder(x)
+        return x
+    
+    def decode(self, enc_out, target):
         target = self.tgt_input(target)
         for decoder in self.decoders:
-            target = decoder(target, x)
-        output = self.output(target)
-        return output
+            target = decoder(target, enc_out)
+        return target
