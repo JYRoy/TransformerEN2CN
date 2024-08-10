@@ -9,13 +9,13 @@ from torch.nn import functional as F
 
 @dataclass
 class TransformerConfig:
-    vocab_size: int = 100277  # tiktoken.n_vocab获取到的vocab size
-    train_max_seq_len: int = 1024  # max sequence length
-    val_max_seq_len: int = 1024  # max sequence length
+    vocab_size: int = 65001
+    train_max_seq_len: int = 1024
+    val_max_seq_len: int = 1024
     max_seq_len: int = max(train_max_seq_len, val_max_seq_len)
-    n_layer: int = 6  # layer number
-    n_head: int = 8  # head number
-    d_model: int = 768  # embedding dimension
+    n_layer: int = 6
+    n_head: int = 8
+    d_model: int = 768
 
 
 class LayerNorm(nn.Module):
@@ -190,7 +190,7 @@ class TransformerModel(nn.Module):
         for encoder in self.encoders:
             x = encoder(x)
         return x
-    
+
     def decode(self, enc_out, target):
         target = self.tgt_input(target)
         for decoder in self.decoders:

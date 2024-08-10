@@ -1,92 +1,87 @@
-import torch
-import tiktoken
+import os
 
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+import tiktoken
 import numpy as np
 
+import torch
+from torch.utils.data import Dataset, random_split, DataLoader
 
-def seq_padding(batch, padding=0):
-    L = [len(seq) for seq in batch]
-    max_len = max(L)
-    return np.array(
-        [
-            (
-                np.concatenate([seq, [padding] * (max_len - len(seq))])
-                if len(seq) < max_len
-                else seq
-            )
-            for seq in batch
-        ]
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+max_input_length = 1024
+max_target_length = 1024
+
+model_checkpoint = "Helsinki-NLP/opus-mt-en-zh"
+tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+tokenizer.add_tokens(["<bos>"])
+
+
+class CMNDataset(Dataset):
+
+    def __init__(self, data_file=None, max_dataset_size=10000):
+        assert data_file != None
+        self.max_dataset_size = max_dataset_size
+        self.data = self.load_data(data_file)
+
+    def load_data(self, data_file):
+        Data = {}
+        with open(data_file, "rt") as f:
+            for idx, line in enumerate(f):
+                if idx >= self.max_dataset_size:
+                    break
+                en, cn, attribute = line.split("\t")
+                cn = "<bos>" + cn
+                Data[idx] = {"english": en, "chinese": cn}
+        return Data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+
+def collote_fn(batch_samples):
+    batch_inputs, batch_targets = [], []
+    for sample in batch_samples:
+        batch_inputs.append(sample["english"])
+        batch_targets.append(sample["chinese"])
+    batch_data = tokenizer(
+        batch_inputs,
+        padding=True,
+        max_length=max_input_length,
+        truncation=True,
+        return_tensors="pt",
     )
+    with tokenizer.as_target_tokenizer():
+        labels = tokenizer(
+            batch_targets,
+            padding=True,
+            max_length=max_target_length,
+            truncation=True,
+            return_tensors="pt",
+        )["input_ids"]
+        batch_data["labels"] = labels
+    return batch_data
 
 
-# 按照句子长度排序，尽可能减少padding
-def len_argsort(seq):
-    return sorted(range(len(seq)), key=lambda x: len(seq[x]))
+# data = CMNDataset(data_file="datasets/cmn.txt", max_dataset_size=10000)
+# train_data, valid_data, test_data = random_split(data, [8000, 1000, 1000])
+# print(f"train set size: {len(train_data)}")
+# print(f"valid set size: {len(valid_data)}")
+# print(f"test set size: {len(test_data)}")
+# print(next(iter(train_data)))
 
+# train_dataloader = DataLoader(
+#     train_data, batch_size=4, shuffle=True, collate_fn=collote_fn
+# )
+# valid_dataloader = DataLoader(
+#     valid_data, batch_size=4, shuffle=False, collate_fn=collote_fn
+# )
 
-class DataLoaderCMN:
-
-    def __init__(self, batch_size, split="train"):
-        assert split in {"train", "val"}
-        self.batch_size = batch_size
-        self.current_position = 0
-
-        self.tokens = []
-        self.en_tokens = []
-        self.cn_tokens = []
-        text = open("./datasets/cmn.txt").read().strip().split("\n")
-
-        self.enc = tiktoken.get_encoding("cl100k_base")
-
-        for line in text:
-            en, cn, attribute = line.split("\t")
-            en = torch.tensor(self.enc.encode(en.lower()))
-            cn = torch.tensor(self.enc.encode(cn))
-            self.tokens.append((en, cn))
-            self.en_tokens.append(en)
-            self.cn_tokens.append(cn)
-        self.num_paris = len(self.tokens)  # 24360 total
-        print(f"loaded {self.num_paris} english to chinese sentence pairs")
-
-        self.en_tokens = (
-            self.en_tokens[: self.num_paris * 90 // 100]
-            if split == "train"
-            else self.en_tokens[self.num_paris * 90 // 100 + 1 :]
-        )
-        self.num_en_pairs = self.num_paris * 90 // 100
-
-        self.cn_tokens = (
-            self.cn_tokens[: self.num_paris * 90 // 100]
-            if split == "train"
-            else self.cn_tokens[self.num_paris * 90 // 100 + 1 :]
-        )
-        self.num_cn_pairs = self.num_paris * 90 // 100
-
-        self.max_en_seq_len = max(len(s) for s in self.en_tokens)
-        self.max_cn_seq_len = max(len(s) for s in self.cn_tokens)
-        self.max_seq_len = max(self.max_en_seq_len, self.max_cn_seq_len)
-
-        sorted_index = len_argsort(self.en_tokens)
-        self.en_tokens = [self.en_tokens[i] for i in sorted_index]
-        self.cn_tokens = [self.cn_tokens[i] for i in sorted_index]
-
-        self.steps_per_epoch = self.num_paris // self.batch_size
-
-    def reset(self):
-        self.current_position = 0
-
-    def next_batch(self):
-        x_batch = self.en_tokens[
-            self.current_position : self.current_position + self.batch_size
-        ]
-        y_batch = self.cn_tokens[
-            self.current_position : self.current_position + self.batch_size
-        ]
-
-        self.current_position += self.batch_size
-        if self.current_position + self.batch_size > self.num_en_pairs:
-            self.current_position = 0
-
-        x_batch = seq_padding(x_batch, self.enc.eot_token)
-        y_batch = seq_padding(y_batch, self.enc.eot_token)
-        return torch.tensor(x_batch), torch.tensor(y_batch)
+# batch = next(iter(train_dataloader))
+# print(batch.keys())
+# print("batch shape:", {k: v.shape for k, v in batch.items()})
+# print(batch)

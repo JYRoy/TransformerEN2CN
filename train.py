@@ -1,88 +1,134 @@
+import random
 import time
+from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import AdamW, get_scheduler
+from sacrebleu.metrics import BLEU
+
 
 from dataloader import *
 from model import *
 
-BATCH_SIZE = 8
-train_data_loader = DataLoaderCMN(batch_size=BATCH_SIZE, split="train")
-val_data_loader = DataLoaderCMN(batch_size=BATCH_SIZE, split="val")
+seed = 2024
+random.seed(seed)
+os.environ["PYTHONHASHSEED"] = str(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+torch.backends.cudnn.deterministic = True
 
-config = TransformerConfig(
-    train_max_seq_len=train_data_loader.max_seq_len,
-    val_max_seq_len=val_data_loader.max_cn_seq_len,
-)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using {device} device")
+BATCH_SIZE = 8
+EPOCH_NUM = 5
+
+data = CMNDataset(data_file="datasets/cmn.txt", max_dataset_size=10000)
+train_data, valid_data, test_data = random_split(data, [8000, 1000, 1000])
+print("tokenizer.vocab_size: ", tokenizer.vocab_size)
+config = TransformerConfig(vocab_size=tokenizer.vocab_size + 1)
 
 model = TransformerModel(config=config)
-model.to("cuda")
+model.to(device)
 for p in model.parameters():
     if p.dim() > 1:
         nn.init.xavier_normal_(p)
 
 # model = torch.compile(model)
+
+train_dataloader = DataLoader(
+    train_data, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collote_fn
+)
+valid_dataloader = DataLoader(
+    valid_data, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collote_fn
+)
+test_dataloader = DataLoader(
+    test_data, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collote_fn
+)
+
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+lr_scheduler = get_scheduler(
+    "linear",
+    optimizer=optimizer,
+    num_warmup_steps=0,
+    num_training_steps=EPOCH_NUM * len(train_dataloader),
+)
 
 
-def train(epochs, print_every=100):
+def train_loop(dataloader, model, optimizer, lr_scheduler, epoch, total_loss):
+    progress_bar = tqdm(range(len(dataloader)))
+    progress_bar.set_description(f"loss: {0:>7f}")
+    finish_batch_num = (epoch - 1) * len(dataloader)
+
     model.train()
-    start = time.time()
-    temp = start
-    total_loss = 0
-    for epoch in range(epochs):
-        for step in range(train_data_loader.steps_per_epoch):
-            optimizer.zero_grad()
-            x, y = train_data_loader.next_batch()
-            x, y = x.to("cuda"), y.to("cuda")
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
-                logits = model(x, y)
+    for batch, batch_data in enumerate(dataloader, start=1):
+        x = batch_data["input_ids"].to(device)
+        y = batch_data["labels"].to(device)
+        logits = model(x, y)
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)), y.view(-1), ignore_index=65000
+        )
 
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                y.view(-1),
-                ignore_index=tiktoken.get_encoding("cl100k_base").eot_token,
-            )
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        lr_scheduler.step()
 
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            if step % print_every == 0:
-                loss_avg = total_loss / print_every
-                print(
-                    "time = %ds, epoch %d, iter = %d, loss = %.3f, %ds per %d iters"
-                    % (
-                        (time.time() - start),
-                        epoch + 1,
-                        step + 1,
-                        loss_avg,
-                        time.time() - temp,
-                        print_every,
-                    )
-                )
-                total_loss = 0
-                temp = time.time()
+        total_loss += loss.item()
+        progress_bar.set_description(
+            f"loss: {total_loss/(finish_batch_num + batch):>7f}"
+        )
+        progress_bar.update(1)
+    return total_loss
 
 
-def translate():
+def test_loop(dataloader, model):
+    preds, labels = [], []
+
     model.eval()
-    enc = tiktoken.get_encoding("cl100k_base")
-    src, target = val_data_loader.next_batch()
-    src, target = src.to("cuda"), target.to("cuda")
-    outputs = torch.zeros(100).type_as(src.data)
-    print(enc.decode(src[0, :].cpu().numpy().tolist()))
-    print(enc.decode(target[0, :].cpu().numpy().tolist()))
-    for step in range(1, config.val_max_seq_len):
-        e_out = model.encode(src)
-        out = model.decode(e_out, outputs[:step].unsqueeze(0))
-        out = model.output(out)
-        out = F.softmax(out, dim=-1)
-        val, ix = out[:, -1].data.topk(1)
-        outputs[step] = ix[0][0].item()
-    print(enc.decode(outputs[1:].cpu().numpy().tolist()))
+    for batch_data in tqdm(dataloader):
+        x = batch_data["input_ids"].to(device)
+        y = batch_data["labels"].to(device)
+        outputs = torch.zeros(100).type_as(x.data)
+        outputs[0] = 65001
+        with torch.no_grad():
+            for step in range(1, 100):
+                e_out = model.encode(x)
+                out = model.decode(e_out, outputs[:step].unsqueeze(0))
+                out = model.output(out)
+                out = F.softmax(out, dim=-1)
+                val, ix = out[:, -1].data.topk(1)
+                outputs[step] = ix[0][0].item()
+                if outputs[step] == 0:
+                    break
+
+        label_tokens = batch_data["labels"].cpu().numpy()
+
+        decoded_preds = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        label_tokens = np.where(
+            label_tokens != 65000, label_tokens, tokenizer.pad_token_id
+        )
+        decoded_labels = tokenizer.batch_decode(label_tokens, skip_special_tokens=True)
+
+        preds += [pred.strip() for pred in decoded_preds]
+        labels += [[label.strip()] for label in decoded_labels]
+    bleu_score = bleu.corpus_score(preds, labels).score
+    print("bleu_score: ", bleu_score)
+    print(preds[0])
+    print(labels[0])
 
 
-if __name__ == "__main__":
-    train(1, 100)
-    translate()
+bleu = BLEU()
+total_loss = 0.0
+for t in range(EPOCH_NUM):
+    print(f"Epoch {t+1}/{EPOCH_NUM}\n-------------------------------")
+    total_loss = train_loop(
+        train_dataloader, model, optimizer, lr_scheduler, t + 1, total_loss
+    )
+test_loop(valid_dataloader, model)
+
+print("Done!")
