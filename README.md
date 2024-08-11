@@ -32,8 +32,8 @@ Transformer由编码器和解码器构成，其中核心部分是attention。
 
 - 注意力层：核心是multi-head attnetion，整合上下文语义信息
 - 前馈层：进行更复杂的非线性变换 $$FFN(x) = Relu(xW_1 + b_1)W_2 + b_2$$
-- 残差链接：$$x = x + module(x)$$
-- layer norm：$$LN(x) = \alpha \frac{x - mean}{std} + \beta$$
+- 残差链接： $$x = x + module(x)$$
+- layer norm： $$LN(x) = \alpha \frac{x - mean}{std} + \beta$$
 
 ![transformer](./images/transformer.png)
 
@@ -119,6 +119,7 @@ token序列是通过一个简单的`nn.Embedding`词嵌入模块获得的，每�
 $$
 PE_{(pos, 2i)} = sin(\frac{pos}{10000^{\frac{2i}{d_{model}}}})
 $$
+
 $$
 PE_{(pos, 2i+1)} = cos(\frac{pos}{10000^{\frac{2i}{d_{model}}}})
 $$
@@ -132,6 +133,7 @@ $$
 $$
 X = [x_1, x_2, ..., x_T]
 $$
+
 $$
 x_t = v_t + p_t
 $$
