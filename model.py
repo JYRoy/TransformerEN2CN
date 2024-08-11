@@ -73,14 +73,16 @@ class MultiHeadAttention(nn.Module):
             1, 2
         )
 
-        # 计算attention score
+        # 计算 attention score
+        # score含义是行 i（src的token i）和列 j（target的token j）间的attention score
         # q @ k:
         #       (batch_size, n_head, seq_len, d_model // n_head) @
         #       (batch_size, n_head, d_model // n_head, seq_len) =
         #       (batch_size, n_head, q_seq_len, k_seq_len)
+        # q_seq_len, k_seq_len）中[i, j]位置表示q中的第i个token和k中的第j个token的attention score
+        #
         # 对于cross attention：
         #   q来自于decoder上一个block， k来自于encoder
-        #   attention score的含义是，行 i（src的token i）和列 j（target的token j）间的attention score
         scores = (q @ k.transpose(-2, -1)) * (1 / math.sqrt(k.size(-1)))
         # mask掉padding的token，避免pad参与attention运算
         if pad_mask != None:
@@ -93,6 +95,7 @@ class MultiHeadAttention(nn.Module):
         scores = F.softmax(scores, dim=-1)
 
         y = scores @ v
+        # 把各个head拼在一起
         y = y.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
         y = self.proj(y)
         return y
