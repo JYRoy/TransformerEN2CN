@@ -29,6 +29,7 @@ EPOCH_NUM = 5
 data = CMNDataset(data_file="datasets/cmn.txt", max_dataset_size=10000)
 train_data, valid_data, test_data = random_split(data, [8000, 1000, 1000])
 print("tokenizer.vocab_size: ", tokenizer.vocab_size)
+
 config = TransformerConfig(vocab_size=tokenizer.vocab_size + 1)
 
 model = TransformerModel(config=config)
@@ -67,7 +68,9 @@ def train_loop(dataloader, model, optimizer, lr_scheduler, epoch, total_loss):
     for batch, batch_data in enumerate(dataloader, start=1):
         x = batch_data["input_ids"].to(device)
         y = batch_data["labels"].to(device)
-        logits = model(x, y)
+        src_mask = batch_data["attention_mask"].unsqueeze(-2).to(device)
+        tgt_mask = batch_data["tgt_mask"].unsqueeze(-2).to(device)
+        logits = model(x, y, src_mask, tgt_mask)
         loss = F.cross_entropy(
             logits.view(-1, logits.size(-1)), y.view(-1), ignore_index=65000
         )
@@ -92,27 +95,31 @@ def test_loop(dataloader, model):
     for batch_data in tqdm(dataloader):
         x = batch_data["input_ids"].to(device)
         y = batch_data["labels"].to(device)
-        outputs = torch.zeros(100).type_as(x.data)
+        src_mask = batch_data["attention_mask"].unsqueeze(-2).to(device)
+
+        outputs = torch.zeros(BATCH_SIZE, 100).type_as(x.data)
         outputs[0] = 65001
         with torch.no_grad():
             for step in range(1, 100):
-                e_out = model.encode(x)
-                out = model.decode(e_out, outputs[:step].unsqueeze(0))
+                e_out = model.encode(x, src_mask)
+                tgt_mask = torch.tril(torch.ones((BATCH_SIZE, step, step))).to(device)
+                out = model.decode(outputs[:, :step], e_out, tgt_mask, src_mask)
                 out = model.output(out)
                 out = F.softmax(out, dim=-1)
-                val, ix = out[:, -1].data.topk(1)
-                outputs[step] = ix[0][0].item()
-                if outputs[step] == 0:
-                    break
+                val, ix = out[:, :, -1].data.topk(1)
+                outputs[:, step] = ix[:][0].item()
+
+        with tokenizer.as_target_tokenizer():
+            decoded_preds = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
         label_tokens = batch_data["labels"].cpu().numpy()
-
-        decoded_preds = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
         label_tokens = np.where(
             label_tokens != 65000, label_tokens, tokenizer.pad_token_id
         )
-        decoded_labels = tokenizer.batch_decode(label_tokens, skip_special_tokens=True)
+        with tokenizer.as_target_tokenizer():
+            decoded_labels = tokenizer.batch_decode(
+                label_tokens, skip_special_tokens=True
+            )
 
         preds += [pred.strip() for pred in decoded_preds]
         labels += [[label.strip()] for label in decoded_labels]
@@ -129,6 +136,6 @@ for t in range(EPOCH_NUM):
     total_loss = train_loop(
         train_dataloader, model, optimizer, lr_scheduler, t + 1, total_loss
     )
-test_loop(valid_dataloader, model)
+    test_loop(valid_dataloader, model)
 
 print("Done!")

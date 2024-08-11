@@ -53,13 +53,16 @@ class MultiHeadAttention(nn.Module):
             ),
         )
 
-    def forward(self, q, k, v, mask: bool = False):
+    def forward(self, q, k, v, pad_mask=None, subsequent_mask: bool = False):
         batch_size, seq_len, d_model = q.size()
 
+        # 通过三个独立的权重矩阵获得q、k、v
         q = self.q_weight(q)
         k = self.k_weight(k)
         v = self.v_weight(v)
 
+        # 通过view转换分为h个头，每个头的维度是d_model//n_head
+        # (batch_size, seq_len, n_head, d_model // n_head) -> (batch_size, n_head, seq_len, d_model // n_head)
         q = q.view(batch_size, -1, self.n_head, self.d_model // self.n_head).transpose(
             1, 2
         )
@@ -70,8 +73,20 @@ class MultiHeadAttention(nn.Module):
             1, 2
         )
 
+        # 计算attention score
+        # q @ k:
+        #       (batch_size, n_head, seq_len, d_model // n_head) @
+        #       (batch_size, n_head, d_model // n_head, seq_len) =
+        #       (batch_size, n_head, q_seq_len, k_seq_len)
+        # 对于cross attention：
+        #   q来自于decoder上一个block， k来自于encoder
+        #   attention score的含义是，行 i（src的token i）和列 j（target的token j）间的attention score
         scores = (q @ k.transpose(-2, -1)) * (1 / math.sqrt(k.size(-1)))
-        if mask:
+        # mask掉padding的token，避免pad参与attention运算
+        if pad_mask != None:
+            scores = scores.masked_fill(pad_mask == 0, float("-inf"))
+        # 用于decoder中的第一个attention block，mask掉当前token后面的token
+        if subsequent_mask:
             scores = scores.masked_fill(
                 self.mask[:, :, :seq_len, :seq_len] == 0, float("-inf")
             )
@@ -107,8 +122,8 @@ class Encoder(nn.Module):
         self.feed_forward = FeedForward(config)
         self.layer_norm_2 = LayerNorm(config)
 
-    def forward(self, x):
-        x = self.layer_norm_1(x + self.attention(x, x, x))
+    def forward(self, x, src_mask):
+        x = self.layer_norm_1(x + self.attention(x, x, x, src_mask))
         x = self.layer_norm_2(x + self.feed_forward(x))
         return x
 
@@ -118,16 +133,19 @@ class Decoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.mask_attention = MultiHeadAttention(config)
-        self.attention = MultiHeadAttention(config)
+        self.cross_attention = MultiHeadAttention(config)
         self.layer_norm_1 = LayerNorm(config)
         self.feed_forward = FeedForward(config)
         self.layer_norm_2 = LayerNorm(config)
         self.layer_norm_3 = LayerNorm(config)
 
-    def forward(self, x, encoder_output):
-        x = self.layer_norm_1(x + self.mask_attention(x, x, x, True))
-        x = self.layer_norm_1(x + self.attention(x, encoder_output, encoder_output))
-        x = self.layer_norm_1(x + self.feed_forward(x))
+    def forward(self, x, encoder_output, tgt_mask, src_mask):
+        x = self.layer_norm_1(x + self.mask_attention(x, x, x, tgt_mask, True))
+
+        x = self.layer_norm_2(
+            x + self.cross_attention(x, encoder_output, encoder_output, src_mask)
+        )
+        x = self.layer_norm_3(x + self.feed_forward(x))
         return x
 
 
@@ -137,21 +155,28 @@ class TransformerInput(nn.Module):
         super().__init__()
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
 
+        # 按照最长的输入长度初始化位置编码矩阵，[max_seq_len, d_model]
         self.position_embedding = torch.zeros(config.max_seq_len, config.d_model).to(
             "cuda"
         )
         position = torch.arange(0, config.max_seq_len)
+        # 增加embedding维度
         position = position.unsqueeze(1)
 
         i = torch.arange(0, config.d_model // 2, 1)
         div = 10000 ** (2 * i / config.d_model)
+        # [max_seq_len, d_model // 2]
         term = position / div
+        # embedding的偶数位置是sin
         self.position_embedding[:, 0::2] = torch.sin(term)
+        # embedding的奇数位置是cos
         self.position_embedding[:, 1::2] = torch.cos(term)
-
+        # 注册为buffer，不参与训练
         self.register_buffer("pe", self.position_embedding)
 
     def forward(self, x):
+        # x: [batch_size, seq_len]
+        # [batch_size, seq_len, d_model] + [seq_len, d_model]
         return self.token_embedding(x) + self.position_embedding[: x.size(1), :]
 
 
@@ -179,20 +204,19 @@ class TransformerModel(nn.Module):
         )
         self.output = TransformerOutput(config)
 
-    def forward(self, source, target):
-        enc_out = self.encode(source)
-        target = self.decode(enc_out, target)
-        output = self.output(target)
-        return output
+    def forward(self, source, target, src_mask, tgt_mask):
+        enc_out = self.encode(source, src_mask)
+        target = self.decode(target, enc_out, tgt_mask, src_mask)
+        return self.output(target)
 
-    def encode(self, source):
+    def encode(self, source, src_mask):
         x = self.src_input(source)
         for encoder in self.encoders:
-            x = encoder(x)
+            x = encoder(x, src_mask)
         return x
 
-    def decode(self, enc_out, target):
+    def decode(self, target, enc_out, tgt_mask, src_mask):
         target = self.tgt_input(target)
         for decoder in self.decoders:
-            target = decoder(target, enc_out)
+            target = decoder(target, enc_out, tgt_mask, src_mask)
         return target

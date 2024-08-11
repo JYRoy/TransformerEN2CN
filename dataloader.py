@@ -62,8 +62,9 @@ def collote_fn(batch_samples):
             max_length=max_target_length,
             truncation=True,
             return_tensors="pt",
-        )["input_ids"]
-        batch_data["labels"] = labels
+        )
+        batch_data["labels"] = labels["input_ids"]
+        batch_data["tgt_mask"] = labels["attention_mask"]
     return batch_data
 
 
